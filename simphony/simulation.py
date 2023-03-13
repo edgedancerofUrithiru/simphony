@@ -13,8 +13,6 @@ used within the context. Devices include theoretical sources and detectors.
 from cmath import rect
 from typing import Callable, ClassVar, List, Optional, Tuple, Union
 
-# JAX_AVAILABLE = False
-
 try:
     import jax
     import jax.numpy as np
@@ -92,7 +90,7 @@ class Simulation:
 
         return False
 
-    def __init__(self, *, fs: float = 1e9, seed: Optional[int] = None) -> None:
+    def __init__(self, *, fs: float = 1e9, seed: Optional[int] = 0) -> None:
         """Initializes the simulation context.
 
         Parameters
@@ -109,12 +107,11 @@ class Simulation:
         self.noise = False
         self.num_samples = 1
         if JAX_AVAILABLE:
-            self.key = jnprand.PRNGKey(0)
+            #Jax requires explicit handling of keys
+            self.key = jnprand.PRNGKey(seed)
             self.key, self.subkey = jnprand.split(self.key)
-            self.rng = testnp.random.default_rng(seed)
         else:
-            self.rng = testnp.random.default_rng(seed)
-        #JAX note, the above line creates a new generator
+            self.rng = np.random.default_rng(seed)
         self.powers = np.array([])
         self.shape = [0, 0]
         self.sources = []
@@ -196,22 +193,44 @@ class Simulation:
 
                 mod = source.modfn(freq, power, t)
                 if np.shape(mod)[0] == 2:
-                    contributions[i, j] = np.stack(
-                        (
-                            contributions[i, j, 0, 0] * np.sqrt(mod[0]),
-                            contributions[i, j, 0, 1] + source.phase + mod[1],
-                        ),
-                        axis=-1,
-                    )
+                    if JAX_AVAILABLE is True:
+                        contributions = contributions.at[i, j, 0, 0].set(
+                            np.stack(
+                                (
+                                    contributions[i, j, 0, 0] * np.sqrt(mod[0]),
+                                    contributions[i, j, 0, 1] + source.phase + mod[1],
+                                ),
+                                axis=-1,
+                            )
+                        )
+                    else:
+                        contributions[i, j] = np.stack(
+                            (
+                                contributions[i, j, 0, 0] * np.sqrt(mod[0]),
+                                contributions[i, j, 0, 1] + source.phase + mod[1],
+                            ),
+                            axis=-1,
+                        )
                 else:
-                    contributions[i, j] = np.stack(
-                        (
-                            contributions[i, j, 0, 0] * np.sqrt(mod),
-                            contributions[i, j, 0, 1]
-                            + np.repeat(source.phase, self.num_samples),
-                        ),
-                        axis=-1,
-                    )
+                    if JAX_AVAILABLE is True:
+                        contributions = contributions.at[i, j].set(
+                            np.stack(
+                                (
+                                    contributions[i, j, 0, 0] * np.sqrt(mod),
+                                    contributions[i, j, 0, 1] + np.repeat(source.phase, self.num_samples),
+                                ),
+                                axis=-1,
+                            )
+                        )
+                    else:
+                        contributions[i, j] = np.stack(
+                            (
+                                contributions[i, j, 0, 0] * np.sqrt(mod),
+                                contributions[i, j, 0, 1]
+                                + np.repeat(source.phase, self.num_samples),
+                            ),
+                            axis=-1,
+                        )
         return contributions
 
     def __compute_detector_power(self, t, detector):
@@ -267,10 +286,14 @@ class Simulation:
                     for j in range(self.shape[1]):
                         for k in range(self.num_samples):
                             if JAX_AVAILABLE:
-                                transmissions = transmissions.at[i, j ,k].set(add_polar(transmissions[i, j, k], contributions[i, j, k]))
+                                transmissions = transmissions.at[i, j ,k].set(
+                                    add_polar(
+                                        transmissions[i, j, k], contributions[i, j, k]
+                                        )
+                                    )
                             else:
                                 transmissions[i, j, k] = add_polar(
-                                transmissions[i, j, k], contributions[i, j, k]
+                                    transmissions[i, j, k], contributions[i, j, k]
                                 )
 
             # convert the output fields to powers
@@ -379,17 +402,30 @@ class Simulation:
                 corr_val = np.exp(
                     -((x[k] - x[i]) ** 2 + (y[k] - y[i]) ** 2) / (0.5 * (l**2))
                 )
-
-                corr_matrix_w[i][k] = corr_matrix_w[k][i] = corr_val
-                corr_matrix_t[i][k] = corr_matrix_t[k][i] = corr_val
+                if JAX_AVAILABLE:
+                    corr_matrix_w = corr_matrix_w.at[k, i].set(corr_val)
+                    corr_matrix_w = corr_matrix_w.at[i, k].set(corr_val)
+                    corr_matrix_t = corr_matrix_t.at[k, i].set(corr_val)
+                    corr_matrix_t = corr_matrix_t.at[i, k].set(corr_val)
+                else:
+                    corr_matrix_w[i][k] = corr_matrix_w[k][i] = corr_val
+                    corr_matrix_t[i][k] = corr_matrix_t[k][i] = corr_val
 
         cov_matrix_w = np.zeros((n, n))
         cov_matrix_t = np.zeros((n, n))
         # generate covariance matrix
         for i in range(n):
             for k in range(n):
-                cov_matrix_w[i][k] = sigmaw * corr_matrix_w[i][k] * sigmaw
-                cov_matrix_t[i][k] = sigmat * corr_matrix_t[i][k] * sigmat
+                if JAX_AVAILABLE is True:
+                    cov_matrix_w = cov_matrix_w.at[i, k].set(
+                        sigmaw * corr_matrix_w[i, k] * sigmaw
+                    )
+                    cov_matrix_t = cov_matrix_t.at[i, k].set(
+                        sigmat * corr_matrix_t[i, k] * sigmat
+                    )
+                else:
+                    cov_matrix_w[i][k] = sigmaw * corr_matrix_w[i][k] * sigmaw
+                    cov_matrix_t[i][k] = sigmat * corr_matrix_t[i][k] * sigmat
 
         try:
             # perform Cholesky decomposition on the covariance matrices
@@ -565,7 +601,6 @@ class Simulation:
 
         # sample the signals
         signals = self._get_signals()
-
         # remove the extra sample if we added one
         if _num_samples != num_samples:
             if signals.ndim == 4:
@@ -724,9 +759,8 @@ class Laser(Source):
             return self.rin_dists[i, j]
         except KeyError:
             if JAX_AVAILABLE:
-                print("NOT IMPLEMENTED, key:", self.context.key)
                 self.rin_dists[i, j] = jnprand.normal(
-                    key=self.context.key,
+                    key=self.context.subkey,
                     shape=(1, self.context.num_samples)
                 )[0]
                 self.context.key, self.context.subkey = jnprand.split(self.context.key)
@@ -852,7 +886,9 @@ class Detector(SimulationModel):
                         for k in range(self.context.num_samples):
                             if power[i][j][k] > 0:
                                 if JAX_AVAILABLE:
-                                    noise = noise.at[k].set(from_db(to_db(power[i][j][k]) + rin) * dist[k])
+                                    noise = noise.at[k].set(
+                                        from_db(to_db(power[i][j][k]) + rin) * dist[k]
+                                    )
                                 else:
                                     noise[k] = (
                                         from_db(to_db(power[i][j][k]) + rin) * dist[k]
@@ -862,9 +898,10 @@ class Detector(SimulationModel):
                     if JAX_AVAILABLE:
                         self.rin_dists = self.rin_dists.at[i, j].set(noise)
                         self.noise_dists = self.noise_dists.at[i, j].set(self.noise * jnprand.normal(
-                            key=self.context.key,
-                            shape=(1, self.context.num_samples)
-                        )[0])
+                            key = self.context.subkey,
+                            shape = (1, self.context.num_samples)
+                            )[0]
+                        )
                         self.context.key, self.context.subkey = jnprand.split(self.context.key)
                     else:
                         self.rin_dists[i][j] = noise
@@ -876,9 +913,18 @@ class Detector(SimulationModel):
 
                     # add the shot noise
                     for k in range(self.context.num_samples):
-                        power[i][j][k] = hffs * self.context.rng.poisson(
-                            power[i][j][k] / hffs
-                        )
+                        if JAX_AVAILABLE:
+                            power = power.at[i, j, k].set(
+                                hffs * jnprand.poisson(
+                                    key = self.context.subkey,
+                                    lam = power[i][j][k] / hffs
+                                )
+                            )
+                            self.context.key, self.context.subkey = jnprand.split(self.context.key)
+                        else:
+                            power[i][j][k] = hffs * self.context.rng.poisson(
+                                power[i][j][k] / hffs
+                            )
 
         # amplify the signal
         signal = (power + self.rin_dists) * self.conversion_gain
@@ -1038,43 +1084,97 @@ class DifferentialDetector(Detector):
                             # only calculate the noise if there is power
                             if p1[i][j][k] > 0:
                                 p1db = to_db(p1[i][j][k])
-                                monitor_noise1[k] = (
-                                    from_db(p1db + monitor_rin) * dist[k]
-                                )
-                                rf_noise1[k] = from_db(p1db + rf_rin + cmrr) * dist[k]
 
+                                if JAX_AVAILABLE is True:
+                                    monitor_noise1 = monitor_noise1.at[k].set(
+                                        from_db(p1db + monitor_rin) * dist[k]
+                                    )
+                                    rf_noise1 = rf_noise1.at[k].set(
+                                        from_db(p1db + rf_rin + cmrr) * dist[k]
+                                    )
+                                else:
+                                    monitor_noise1[k] = (
+                                        from_db(p1db + monitor_rin) * dist[k]
+                                    )
+                                    rf_noise1[k] = from_db(p1db + rf_rin + cmrr) * dist[k]
+
+                                    
                             # only calculate the noise if there is power
                             if p2[i][j][k] > 0:
                                 p2db = to_db(p2[i][j][k])
-                                monitor_noise2[k] = (
-                                    from_db(p2db + monitor_rin) * dist[k]
-                                )
-                                rf_noise2[k] = from_db(p2db + rf_rin + cmrr) * dist[k]
+
+                                if JAX_AVAILABLE is True:
+                                    monitor_noise2 = monitor_noise2.at[k].set(
+                                        from_db(p2db + monitor_rin) * dist[k]
+                                    )
+                                    rf_noise2 = rf_noise2.at[k].set(
+                                        from_db(p2db + rf_rin + cmrr) * dist[k]
+                                    )
+                                else:
+                                    monitor_noise2[k] = (
+                                        from_db(p2db + monitor_rin) * dist[k]
+                                    )
+                                    rf_noise2[k] = from_db(p2db + rf_rin + cmrr) * dist[k]
+
 
                     # store the RIN noise for later use
-                    self.monitor_rin_dists1[i][j] = monitor_noise1
-                    self.monitor_rin_dists2[i][j] = monitor_noise2
-                    self.rf_rin_dists1[i][j] = rf_noise1
-                    self.rf_rin_dists2[i][j] = rf_noise2
+                    if JAX_AVAILABLE is True:
+                        self.monitor_rin_dists1 = self.monitor_rin_dists1.at[i, j].set(monitor_noise1)
+                        self.monitor_rin_dists2 = self.monitor_rin_dists2.at[i, j].set(monitor_noise2)
+                        self.rf_rin_dists1 = self.rf_rin_dists1.at[i, j].set(rf_noise1)
+                        self.rf_rin_dists2 = self.rf_rin_dists2.at[i, j].set(rf_noise2)
+                    else:
+                        self.monitor_rin_dists1[i][j] = monitor_noise1
+                        self.monitor_rin_dists2[i][j] = monitor_noise2
+                        self.rf_rin_dists1[i][j] = rf_noise1
+                        self.rf_rin_dists2[i][j] = rf_noise2
 
                     # calculate and store electrical noise
-                    self.monitor_noise_dists[i][
-                        j
-                    ] = self.monitor_noise * self.context.rng.normal(
-                        size=self.context.num_samples
-                    )
-                    self.rf_noise_dists[i][j] = self.rf_noise * self.context.rng.normal(
-                        size=self.context.num_samples
-                    )
+                    if JAX_AVAILABLE:
+                        self.monitor_noise_dists = self.monitor_noise_dists.at[i, j].set(
+                            self.monitor_noise * jnprand.normal(
+                                key = self.context.subkey,
+                                shape = (1, self.context.num_samples)
+                            )[0]
+                        )
+                        self.context.key, self.context.subkey = jnprand.split(self.context.key)
+                        self.rf_noise_dists = self.rf_noise_dists.at[i, j].set(
+                            self.rf_noise * jnprand.normal(
+                                key = self.context.subkey,
+                                shape = (1, self.context.num_samples)
+                            )[0]
+                        )
+                        self.context.key, self.context.subkey = jnprand.split(self.context.key)
+                    else:
+                        self.monitor_noise_dists[i][j] = self.monitor_noise * self.context.rng.normal(
+                            size=self.context.num_samples
+                        )
+                        self.rf_noise_dists[i][j] = self.rf_noise * self.context.rng.normal(
+                            size=self.context.num_samples
+                        )
 
                     # add the shot noise
                     for k in range(self.context.num_samples):
-                        p1[i][j][k] = hffs * self.context.rng.poisson(
-                            p1[i][j][k] / hffs
-                        )
-                        p2[i][j][k] = hffs * self.context.rng.poisson(
-                            p2[i][j][k] / hffs
-                        )
+                        if JAX_AVAILABLE is True:
+                            p1 = p1.at[i, j, k].set(hffs * jnprand.poisson(
+                                    key=self.context.subkey,
+                                    lam= p1[i, j, k] / hffs
+                                )
+                            )
+                            self.context.key, self.context.subkey = jnprand.split(self.context.key)
+                            p2 = p2.at[i, j, k].set(hffs * jnprand.poisson(
+                                    key = self.context.subkey,
+                                    lam = p2[i, j, k] / hffs
+                                )
+                            )
+                            self.context.key, self.context.subkey = jnprand.split(self.context.key)
+                        else:
+                            p1[i][j][k] = hffs * self.context.rng.poisson(
+                                p1[i][j][k] / hffs
+                            )
+                            p2[i][j][k] = hffs * self.context.rng.poisson(
+                                p2[i][j][k] / hffs
+                            )
 
         # return the outputs
         return (

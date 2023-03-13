@@ -21,9 +21,15 @@ they form a circuit. There are three ways to connect components:
 import os
 from typing import ClassVar, Dict, List, Optional, Tuple, Union
 
-import numpy as testnp
-import jax.numpy as np
-# import numpy as np
+try:
+    import jax
+    import jax.numpy as np
+    import jax.random as jnprand
+    
+    JAX_AVAILABLE = True
+except ImportError:
+    import numpy as np
+    JAX_AVAILABLE = False
 
 try:
     from gdsfactory import Component, ComponentReference
@@ -625,32 +631,32 @@ class Subcircuit(Model):
             for freq in freqs:
                 try:
                     # use the cached s-matrix if available
-                    #print(self.__class__.scache)
-                    s_matrix = self.__class__.scache[component][freq]
+                    
+                    # Jax returns an indexed value as an array type, cast to float
+                    if JAX_AVAILABLE:
+                        freq = float(freq)
+                    s_matrix = self.__class__.scache[component][freq] #changed to freqtup
                 except KeyError:
                     # make sure the frequency dict is created
                     if component not in self.__class__.scache:
-                        #print("component not in scache:", component)
                         self.__class__.scache[component] = {}
-                    #print("scache:", self.__class__.scache[component])
                     # store the s-matrix for the frequency and component
-                    s_matrix = getattr(component, s_parameters_method)(
-                        np.array([freq])
-                    )[0]
-                    #x = tuple(freq)
-                    #x = testnp.load(freq, allow_pickle=True)
-                    #print("s matrix", s_matrix, "component", component, "freq", freq)
-                    #print("freq", type(freq))
-                    #print("type x:", type(testnp.array(freq)))
-                    x = testnp.array(freq)
-                    #print(x)
-                          #, freq.at[0].get())
-                    x1 = testnp.reshape(x, 1)
-                    freqtup = tuple(x1)
-                    #print("scache:", self.__class__.scache[component][freqtup])
-                    self.__class__.scache[component][freqtup] = s_matrix
-                    #print("scache now:", self.__class__.scache[component][freqtup])
-                    #self.__class__.scache.at[component][freq].set(s_matrix)
+                    if JAX_AVAILABLE:
+                        s_matrix = getattr(component, s_parameters_method)(
+                            np.array([freq])
+                        )[0] #was changed from omitting the "[0]" because Jax was creating an array of the wrong dimensions
+                        
+                        # Jax returns an indexed array value as an array type, cast to float for processing
+                        #TODO: will float() cause performance degradation?
+                        freq = float(freq)
+                    else:
+                        s_matrix = getattr(component, s_parameters_method)(
+                            np.array([freq])
+                        )
+
+                    self.__class__.scache[component][freq] = s_matrix
+                    #self.__class__.scache[component] = self.__class__.scache[component].at(freq).set(s_matrix)
+
 
                 # add the s-matrix to our list of s-matrices
                 s_params.append(s_matrix)
